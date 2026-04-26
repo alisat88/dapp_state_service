@@ -3,10 +3,11 @@ import requests
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import os
 from pathlib import Path
 
-API_URL = "http://127.0.0.1:8003"
-REQUEST_TIMEOUT = 5
+API_URL = os.getenv("API_URL", "http://127.0.0.1:8003").rstrip("/")
+REQUEST_TIMEOUT = 20
 KNOWNCOMPUTE_LOGO_PATH = Path.home() / "Desktop/goknown_monorepo/frontend/src/assets/KnownCompute.jpg"
 
 THEME = {
@@ -466,6 +467,43 @@ def apply_dark_plotly_theme(fig, height=None):
     return fig
 
 
+def show_backend_unreachable_error():
+    cloud_note = ""
+    if "127.0.0.1" in API_URL or "localhost" in API_URL:
+        cloud_note = (
+            " On Streamlit Cloud, localhost/127.0.0.1 points to the frontend "
+            "container and will not work unless the backend is deployed publicly "
+            "and API_URL is set to that public backend URL."
+        )
+
+    st.error(
+        "Backend API is not reachable. The frontend is running, but the backend "
+        "service is offline or not deployed.\n\n"
+        f"API_URL currently in use: `{API_URL}`.{cloud_note}"
+    )
+
+
+def api_request(method, endpoint, **kwargs):
+    try:
+        return requests.request(
+            method,
+            f"{API_URL}{endpoint}",
+            timeout=REQUEST_TIMEOUT,
+            **kwargs
+        )
+    except requests.exceptions.RequestException:
+        show_backend_unreachable_error()
+        return None
+
+
+def api_get(endpoint, **kwargs):
+    return api_request("GET", endpoint, **kwargs)
+
+
+def api_post(endpoint, **kwargs):
+    return api_request("POST", endpoint, **kwargs)
+
+
 inject_theme_css()
 
 # =====================================================
@@ -486,22 +524,16 @@ with link_col2:
 
 @st.cache_data(ttl=5)
 def fetch_governance_data():
-    try:
-        r = requests.get(f"{API_URL}/analytics/by-domain", timeout=REQUEST_TIMEOUT)
-        if r.status_code == 200:
-            return r.json()
-    except:
-        return {}
+    r = api_get("/analytics/by-domain")
+    if r is not None and r.status_code == 200:
+        return r.json()
     return {}
 
 @st.cache_data(ttl=5)
 def fetch_full_history():
-    try:
-        r = requests.get(f"{API_URL}/analytics/history", timeout=REQUEST_TIMEOUT)
-        if r.status_code == 200:
-            return r.json()
-    except:
-        return []
+    r = api_get("/analytics/history")
+    if r is not None and r.status_code == 200:
+        return r.json()
     return []
 
 # =====================================================
@@ -596,8 +628,8 @@ if mode == "🧠 Live Execution":
         )
 
         if st.button("Generate Model"):
-            r = requests.post(f"{API_URL}/model/generate", params={"domain":domain})
-            if r.status_code == 200:
+            r = api_post("/model/generate", params={"domain":domain})
+            if r is not None and r.status_code == 200:
                 data = r.json()
                 st.session_state.model_id = data["model_id"]
                 st.session_state.version = data["version"]
@@ -609,25 +641,26 @@ if mode == "🧠 Live Execution":
 
             with action_col1:
                 if st.button("Activate Model"):
-                    requests.post(
-                        f"{API_URL}/model/activate",
+                    r = api_post(
+                        "/model/activate",
                         params={
                             "model_id":st.session_state.model_id,
                             "version":st.session_state.version
                         }
                     )
-                    st.success("Model Activated")
+                    if r is not None:
+                        st.success("Model Activated")
 
             with action_col2:
                 if st.button("Create Workflow"):
-                    r = requests.post(
-                        f"{API_URL}/workflow/create",
+                    r = api_post(
+                        "/workflow/create",
                         params={
                             "model_id":st.session_state.model_id,
                             "version":st.session_state.version
                         }
                     )
-                    if r.status_code == 200:
+                    if r is not None and r.status_code == 200:
                         data = r.json()
                         st.session_state.workflow_id = data["workflow_id"]
                         st.session_state.current_state = data["current_state"]
@@ -638,22 +671,22 @@ if mode == "🧠 Live Execution":
             st.subheader("Execute Transition")
             st.write("Current State:", st.session_state.current_state)
 
-            r = requests.get(
-                f"{API_URL}/workflow/{st.session_state.workflow_id}/allowed-events"
+            r = api_get(
+                f"/workflow/{st.session_state.workflow_id}/allowed-events"
             )
 
-            if r.status_code == 200:
+            if r is not None and r.status_code == 200:
                 allowed = r.json()["events"]
 
                 if allowed:
                     selected = st.selectbox("Allowed Events", allowed)
 
                     if st.button("Execute Event"):
-                        r2 = requests.post(
-                            f"{API_URL}/workflow/{st.session_state.workflow_id}/execute",
+                        r2 = api_post(
+                            f"/workflow/{st.session_state.workflow_id}/execute",
                             params={"event":selected}
                         )
-                        if r2.status_code == 200:
+                        if r2 is not None and r2.status_code == 200:
                             data = r2.json()
                             st.session_state.current_state = data["new_state"]
                             st.success(f"Severity: {data['severity']}")
@@ -794,8 +827,8 @@ elif mode == "📥 Batch CSV Scoring":
 
         if file:
             if st.button("Run Scoring"):
-                r = requests.post(f"{API_URL}/analytics/score-csv", files={"file":file})
-                if r.status_code == 200:
+                r = api_post("/analytics/score-csv", files={"file":file})
+                if r is not None and r.status_code == 200:
                     st.dataframe(pd.DataFrame(r.json()))
 
 # =====================================================
@@ -811,11 +844,11 @@ elif mode == "⚙️ Admin Controls":
 
         with admin_col1:
             if st.button("Archive Data"):
-                requests.post(f"{API_URL}/admin/soft-reset")
+                api_post("/admin/soft-reset")
 
         with admin_col2:
             if st.button("Delete All Data"):
-                requests.post(f"{API_URL}/admin/hard-reset")
+                api_post("/admin/hard-reset")
 
 # =====================================================
 # 🎥 TUTORIALS
